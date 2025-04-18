@@ -3,6 +3,8 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
 @dataclass
 class GPTConfig:
     block_size: int = 256
@@ -10,6 +12,21 @@ class GPTConfig:
     n_layer: int = 6
     n_head: int = 6
     n_embd:int = 384
+
+class MLP(nn.module):
+    def __init__(self, config: GPTConfig):
+        super().__init__()
+        self.ff1 = nn.Linear(config.n_embd, config.n_embd *4)
+        self.ff2 = nn.Linear(config.n_embd*4, config.n_embd)
+        self.dropout = nn.Dropout(0.2)
+    
+    def forward(self, x):
+        x = F.gelu(self.ff1(x), approximate='tanh')
+        x= self.dropout(x)
+        x = self.ff2(x)
+        x = self.dropout(x)
+        return x
+    
 
 class CausalSelfAttention(nn.Module):
     #this is the batched implementation
@@ -66,11 +83,32 @@ class GPT(nn.Module):
     def __init__(self, config: GPTConfig):
         super().__init__()
         self.config = config
+        
+        # ── embeddings ─────────────────────────────────
+        self.emb_drop = nn.Dropout(0.2)
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = nn.LayerNorm(config.n_embd)
         ))
+        
+        # ── language‑model head ───────────────────────
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        # weight tying scheme
+        self.lm_head.weight = self.transformer['wte'].weight
+    
+    def forward (self, idx):
+        B,T = idx.shape
+        tok_embd = self.transformer['wte'](idx) #B,T,C
+        pos_ids = torch.arange(T).unsqueeze(0) #1,T
+        pos_embd = self.transformer['wpe'](pos_ids) #1,T,C
+        x = tok_embd+pos_embd #B,T,C
+        x = self.emb_drop(x)
+        for block in self.transformer['h']:
+            x = block(x)
+        logits = self.lm_head(self.transformer['ln_f'](x))
+        return logits
+
      
