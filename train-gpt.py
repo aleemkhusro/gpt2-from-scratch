@@ -2,7 +2,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from dataloader import get_batch
+from dataloader import DataLoaderLite
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 max_iters = 5000
 eval_interval = 20
@@ -12,7 +12,7 @@ learning_rate = 3e-4
 @dataclass
 class GPTConfig:
     block_size: int = 256
-    vocab_size: int = 65
+    vocab_size: int = 50257
     n_layer: int = 6
     n_head: int = 6
     n_embd:int = 384
@@ -66,8 +66,8 @@ class CausalSelfAttention(nn.Module):
 
         embd = embd.transpose(1,2) #B,T,nh,hs
         output = embd.contiguous().view(B,T,C)
-        output = self.resid_dropout(output)
         output = self.proj(output)
+        output = self.resid_dropout(output)
         
         return output
 
@@ -154,19 +154,21 @@ def evaluate_loss_overfit(model: nn.Module, config: GPTConfig, X, Y):
     model.train()
     return out
 
+# --------------------------model init and train
 config = GPTConfig()
-
 model = GPT(config)
 model.to(device)
-optimizer = torch.optim.AdamW(model.parameters(), lr = 1e-3)
+optimizer = torch.optim.AdamW(model.parameters(), lr = 3e-4)
 
-max_iters = 1000
-xb, yb = get_batch('train', config)
-for iteration in range(max_iters):
+train_loader =DataLoaderLite(B=4, T=32)
+max_iters = 1
+# xb, yb = get_batch('train', config)
+for iteration in range(50):
     # if iteration % eval_interval ==0 and iteration >0:
     #     losses_records = evaluate_loss_overfit(model, config, xb, yb)
     #     print(f"step {iter}: train loss: {losses_records['train']:.4f}, val loss: {losses_records['val']:.4f}")
-
+    xb, yb = train_loader.next_batch()
+    xb, yb = xb.to(device), yb.to(device)
     optimizer.zero_grad()
     _, loss = model(xb, yb)
     loss.backward()
@@ -174,6 +176,41 @@ for iteration in range(max_iters):
         print(loss.mean())
     optimizer.step()
 
+
+# -------------------------------------- generate from the model 
+num_return_sequences = 5
+max_length = 100
+model.eval()
+
+import tiktoken
+enc = tiktoken.get_encoding('gpt2')
+tokens = enc.encode("Hello, I'm a language model and we are,")
+tokens = torch.tensor(tokens, dtype=torch.long) # (8,)
+tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1) # (B, T)
+x = tokens.to('cuda')
+
+torch.manual_seed(42)
+torch.cuda.manual_seed(42)
+while x.size(1) < max_length:
+    with torch.no_grad():
+        logits,_ = model(x) # B,T,vocab_size
+        logits = logits[:,-1,:] # get the logits of the last timestep
+        probs = F.softmax(logits, dim=-1)
+        #do top-k sampling where k=50
+        #tok_prbs is B,50 and topk_indices is also B,50
+        topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
+        ix = torch.multinomial(topk_probs, 1) #B,1
+        xcol = torch.gather (topk_indices, -1, ix) #B,1
+        x= torch.cat((x,xcol), dim=1) #B,T+1
+
+# print the generated text
+for i in range(num_return_sequences):
+    tokens = x[i, :max_length].tolist()
+    decoded = enc.decode(tokens)
+    print(">", decoded)
+
+
+        
 
 
 
