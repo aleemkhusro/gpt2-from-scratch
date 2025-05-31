@@ -23,6 +23,7 @@ class MLP(nn.Module):
         super().__init__()
         self.ff1 = nn.Linear(config.n_embd, config.n_embd *4)
         self.ff2 = nn.Linear(config.n_embd*4, config.n_embd)
+        self.ff2.SCALE_INIT = 1 #flag for special inits
         self.dropout = nn.Dropout(0.2)
     
     def forward(self, x):
@@ -41,6 +42,8 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.main_weight_matrix = nn.Linear(config.n_embd, config.n_embd*3)
         self.proj = nn.Linear(config.n_embd, config.n_embd)
+        self.proj.SCALE_INIT = 1 #add a flag to check for special initialization. Only proj weights scaled because it takes part in resdual connections. Cumulative adding 
+        #can increase the variance of the activation because y = x + f(x) in each block, n_layer times. 
         self.attn_dropout = nn.Dropout(0.2)
         self.resid_dropout = nn.Dropout(0.2)
         self.register_buffer('tril', torch.tril(torch.ones(config.block_size, config.block_size)))
@@ -103,8 +106,21 @@ class GPT(nn.Module):
         # ── language‑model head ───────────────────────
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
-        # weight tying scheme
+        # weight tying scheme. Inputs and outputs live in the same semantic space
         self.lm_head.weight = self.transformer['wte'].weight
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, torch.nn.Linear):
+            std = 0.02
+            if hasattr(module, "SCALE_INIT"):
+                std *= (2*self.config.n_layer) **-0.5
+            torch.nn.init.normal_(module.weight, mean =0, std=std)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        if isinstance(module, torch.nn.Embedding):
+            #1/sqrt(dmodel) also comes out to ~0.02 for different dmodlels like 768, 1024 etc. This is what they chose in the gpt2 papers
+            torch.nn.init.normal_(module.weight, mean=0, std =0.02)
     
     def forward (self, idx, target=None):
         B,T = idx.shape
