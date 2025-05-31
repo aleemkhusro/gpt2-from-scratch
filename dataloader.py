@@ -1,38 +1,31 @@
+import tiktoken
+import torch 
 
-import torch
-torch.manual_seed(1337)
-# read it in to inspect it
-with open('Data\\input.txt', 'r', encoding='utf-8') as f:
-    text = f.read()
+class DataLoaderLite:
+    def __init__(self, B, T):
+        self.B = B
+        self.T = T
 
-chars = sorted(list(set(text)))
-vocab_size = len(chars)
+        # at init load tokens from disk and store them in memory
+        with open('Data/input.txt', 'r') as f:
+            text = f.read()
+        enc = tiktoken.get_encoding('gpt2')
+        tokens = enc.encode(text)
+        self.tokens = torch.tensor(tokens)
+        print(f"loaded {len(self.tokens)} tokens")
+        print(f"1 epoch = {len(self.tokens) // (B * T)} batches")
 
-# create a mapping from characters to integers
-stoi = { ch:i for i,ch in enumerate(chars) }
-itos = { i:ch for i,ch in enumerate(chars) }
-encode = lambda s: [stoi[c] for c in s] # encoder: take a string, output a list of integers
-decode = lambda l: ''.join([itos[i] for i in l]) # decoder: take a list of integers, output a string
+        # state
+        self.current_position = 0
 
-#create train and test splits
-data = torch.tensor(encode(text), dtype=torch.long)
-n = int(0.9*len(data)) # first 90% is train, rest val
-train_data = data[:n]
-val_data = data[n:]
-
-def get_batch(split, config):
-    # generate a small batch of data of inputs x and targets y
-    data = train_data if split == 'train' else val_data
-    ix = torch.randint(len(data) - config.block_size, (config.batch_size,))
-    xappender = []
-    yappender = []
-    for i in ix:
-        xappender.append(data[i:i+config.block_size])
-    x = torch.stack(xappender)
-    for i in ix:
-        yappender.append(data[i+1:i+config.block_size+1])
-    y = torch.stack(yappender)
-    x,y = x.to('cuda'), y.to('cuda')
-
-
-    return x, y
+    def next_batch(self):
+        B, T = self.B, self.T
+        buf = self.tokens[self.current_position : self.current_position+B*T+1]
+        x = (buf[:-1]).view(B, T) # inputs
+        y = (buf[1:]).view(B, T) # targets
+        # advance the position in the tensor
+        self.current_position += B * T
+        # if loading the next batch would be out of bounds, reset
+        if self.current_position + (B * T + 1) > len(self.tokens):
+            self.current_position = 0
+        return x, y
