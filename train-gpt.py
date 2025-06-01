@@ -16,7 +16,8 @@ class GPTConfig:
     n_layer: int = 12
     n_head: int = 12
     n_embd:int = 768
-    batch_size: int = 64    
+    batch_size: int = 64
+    use_flash_attn: bool = True    
 
 class MLP(nn.Module):
     def __init__(self, config: GPTConfig):
@@ -39,6 +40,7 @@ class CausalSelfAttention(nn.Module):
     def __init__(self, config: GPTConfig):
         super().__init__()
         assert config.n_embd % config.n_head == 0
+        self.config = config
         self.n_head = config.n_head
         self.main_weight_matrix = nn.Linear(config.n_embd, config.n_embd*3)
         self.proj = nn.Linear(config.n_embd, config.n_embd)
@@ -59,13 +61,16 @@ class CausalSelfAttention(nn.Module):
         v = v.view(B,T,self.n_head,C//self.n_head) #B,T,nh,hs
         v = v.transpose(1,2) #B,nh,T,hs
         hs = (C//self.n_head)
-
-        attn = (q@k.transpose(-2,-1)) * (hs**-0.5) #B,nh,T,T
-        mask = self.tril[:T,:T].view(1,1,T,T)
-        attn = attn.masked_fill(mask ==0, float('-inf'))
-        attn = F.softmax(attn, dim=-1)
-        attn = self.attn_dropout(attn)
-        embd = attn @ v #B,nh,T,hs
+        if not self.config.use_flash_attn:
+            attn = (q@k.transpose(-2,-1)) * (hs**-0.5) #B,nh,T,T
+            mask = self.tril[:T,:T].view(1,1,T,T)
+            attn = attn.masked_fill(mask ==0, float('-inf'))
+            attn = F.softmax(attn, dim=-1)
+            attn = self.attn_dropout(attn)
+            embd = attn @ v #B,nh,T,hs
+        else:
+            #using flash attention
+            embd = F.scaled_dot_product_attention(q,k,v, is_causal=True)
 
         embd = embd.transpose(1,2) #B,T,nh,hs
         output = embd.contiguous().view(B,T,C)
