@@ -11,11 +11,11 @@ learning_rate = 3e-4
 
 @dataclass
 class GPTConfig:
-    block_size: int = 256
+    block_size: int = 512
     vocab_size: int = 50257
-    n_layer: int = 6
-    n_head: int = 6
-    n_embd:int = 384
+    n_layer: int = 12
+    n_head: int = 12
+    n_embd:int = 768
     batch_size: int = 64    
 
 class MLP(nn.Module):
@@ -112,8 +112,10 @@ class GPT(nn.Module):
 
     def _init_weights(self, module):
         if isinstance(module, torch.nn.Linear):
+            #in the beginning the std is 0.02 as per the gpt2 paper.
             std = 0.02
             if hasattr(module, "SCALE_INIT"):
+                #Factor of 2 is multiplied here because there are two residual connections, one for attn, and one for mlp. 
                 std *= (2*self.config.n_layer) **-0.5
             torch.nn.init.normal_(module.weight, mean =0, std=std)
             if module.bias is not None:
@@ -171,28 +173,43 @@ def evaluate_loss_overfit(model: nn.Module, config: GPTConfig, X, Y):
     return out
 
 # --------------------------model init and train
+import time
+torch.manual_seed(1337)
+torch.cuda.manual_seed(1337)
+
+torch.set_float32_matmul_precision('high')
 config = GPTConfig()
 model = GPT(config)
 model.to(device)
 optimizer = torch.optim.AdamW(model.parameters(), lr = 3e-4)
 
-train_loader =DataLoaderLite(B=4, T=32)
+train_loader =DataLoaderLite(B=8, T=512)
+# torch.set_float32_matmul_precision('high')
+
 max_iters = 1
 # xb, yb = get_batch('train', config)
 for iteration in range(50):
+    t0 = time.time()
     # if iteration % eval_interval ==0 and iteration >0:
     #     losses_records = evaluate_loss_overfit(model, config, xb, yb)
     #     print(f"step {iter}: train loss: {losses_records['train']:.4f}, val loss: {losses_records['val']:.4f}")
     xb, yb = train_loader.next_batch()
     xb, yb = xb.to(device), yb.to(device)
     optimizer.zero_grad()
-    _, loss = model(xb, yb)
+    with torch.autocast(device_type=device, dtype=torch.bfloat16):
+        _, loss = model(xb, yb)
     loss.backward()
     with torch.no_grad():
         print(loss.mean())
     optimizer.step()
+    torch.cuda.synchronize() # wait for the GPU to finish work
+    t1 = time.time()
+    dt = (t1 - t0)*1000 # time difference in miliseconds
+    tokens_per_sec = (train_loader.B * train_loader.T) / (t1 - t0)
+    print(f"step {iteration}, loss: {loss.item()}, dt: {dt:.2f}ms, tok/sec: {tokens_per_sec:.2f}")
 
-
+import sys
+sys.exit(0)
 # -------------------------------------- generate from the model 
 num_return_sequences = 5
 max_length = 100
@@ -205,8 +222,7 @@ tokens = torch.tensor(tokens, dtype=torch.long) # (8,)
 tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1) # (B, T)
 x = tokens.to('cuda')
 
-torch.manual_seed(42)
-torch.cuda.manual_seed(42)
+
 while x.size(1) < max_length:
     with torch.no_grad():
         logits,_ = model(x) # B,T,vocab_size
