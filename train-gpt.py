@@ -160,7 +160,7 @@ torch.set_float32_matmul_precision('high')
 config = GPTConfig()
 model = GPT(config)
 model.to(device)
-optimizer = configure_optimizers(weight_decay=0.1, lr = 6e-04)
+optimizer = configure_optimizers(weight_decay=0.1, learning_rate = 6e-04, model = model)
 
 train_loader =DataLoaderLite(B=8, T=512)
 # torch.set_float32_matmul_precision('high')
@@ -180,14 +180,15 @@ for iteration in range(150):
     # Unlucky batch -> high loss -> high gradient update -> shock the model. So clip. 
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     for param_group in optimizer.param_groups:
-        param_group['lr'] = get_lr(iteration) #cosine decayed learning rate scheduler
+        lr = get_lr(iteration)
+        param_group['lr'] =lr #cosine decayed learning rate scheduler
     optimizer.step()
     torch.cuda.synchronize() # wait for the GPU to finish work
     t1 = time.time()
     dt = (t1 - t0)*1000 # time difference in miliseconds
     tokens_processed = (train_loader.B * train_loader.T) 
-    tokens_persec = tokens_processed/dt
-    print(f"step {iteration} | loss: {loss.item():.6f} | norm: {norm:.4f}  | dt: {dt:.2f}ms | tok/sec: {tokens_persec:.2f}")
+    tokens_persec = tokens_processed/(t1-t0)
+    print(f"step {iteration} | loss: {loss.item():.6f} | norm: {norm:.4f}  | lr = {lr:.4e} | dt: {dt:.2f}ms | tok/sec: {tokens_persec:.2f}")
 
 import sys
 sys.exit(0)

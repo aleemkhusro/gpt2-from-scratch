@@ -1,8 +1,8 @@
 import torch
 
-def configure_optimizers(self, weight_decay, learning_rate):
+def configure_optimizers(weight_decay, learning_rate, model):
     # start with all of the candidate parameters (that require grad)
-    param_dict = {pn: p for pn, p in self.named_parameters()}
+    param_dict = {pn: p for pn, p in model.named_parameters()}
     param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
     # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
     # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.

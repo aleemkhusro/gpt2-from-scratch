@@ -2,7 +2,7 @@ import math
 max_lr = 6e-4
 min_lr = max_lr * 0.1
 warmup_steps = 10
-max_steps = 50
+max_steps = 150
 def get_lr(it):
     # 1) linear warmup for warmup_iters steps
     if it < warmup_steps:
