@@ -12,7 +12,7 @@ learning_rate = 3e-4
 @dataclass
 class GPTConfig:
     block_size: int = 512
-    vocab_size: int = 50257
+    vocab_size: int = 50304
     n_layer: int = 12
     n_head: int = 12
     n_embd:int = 768
@@ -148,34 +148,6 @@ class GPT(nn.Module):
         
         return logits, None
 
-def evaluate_loss(model: nn.Module, config: GPTConfig):
-    model.eval()
-    out = {}
-    for split in ['train', 'val']:
-        
-        
-        losses = torch.zeros(eval_iters)
-        for iter in range(eval_iters):
-            X,Y = get_batch(split)
-            logits, loss = model(X,Y)
-            losses[iter] = loss.item()
-        out[split] = losses.mean()
-    model.train()
-    return out
-
-def evaluate_loss_overfit(model: nn.Module, config: GPTConfig, X, Y):
-    model.eval()
-    out = {}
-    for split in ['train', 'val']:
-        
-        
-        losses = torch.zeros(eval_iters)
-        for iter in range(eval_iters):
-            logits, loss = model(X,Y)
-            losses[iter] = loss.item()
-        out[split] = losses.mean()
-    model.train()
-    return out
 
 # --------------------------model init and train
 import time
@@ -210,8 +182,9 @@ for iteration in range(50):
     torch.cuda.synchronize() # wait for the GPU to finish work
     t1 = time.time()
     dt = (t1 - t0)*1000 # time difference in miliseconds
-    tokens_per_sec = (train_loader.B * train_loader.T) / (t1 - t0)
-    print(f"step {iteration}, loss: {loss.item()}, dt: {dt:.2f}ms, tok/sec: {tokens_per_sec:.2f}")
+    tokens_processed = (train_loader.B * train_loader.T) 
+    tokens_persec = tokens_processed/dt
+    print(f"step {iteration} | loss: {loss.item():.6f} | dt: {dt:.2f}ms | tok/sec: {tokens_persec:.2f}")
 
 import sys
 sys.exit(0)
