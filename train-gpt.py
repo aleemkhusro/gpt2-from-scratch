@@ -3,6 +3,8 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from dataloader import DataLoaderLite
+from utils.learning_rate_scheduler import get_lr
+from utils.optimizers import configure_optimizers
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 max_iters = 5000
 eval_interval = 20
@@ -158,33 +160,34 @@ torch.set_float32_matmul_precision('high')
 config = GPTConfig()
 model = GPT(config)
 model.to(device)
-optimizer = torch.optim.AdamW(model.parameters(), lr = 3e-4)
+optimizer = configure_optimizers(weight_decay=0.1, lr = 6e-04)
 
 train_loader =DataLoaderLite(B=8, T=512)
 # torch.set_float32_matmul_precision('high')
 
 max_iters = 1
 # xb, yb = get_batch('train', config)
-for iteration in range(50):
+for iteration in range(150):
     t0 = time.time()
-    # if iteration % eval_interval ==0 and iteration >0:
-    #     losses_records = evaluate_loss_overfit(model, config, xb, yb)
-    #     print(f"step {iter}: train loss: {losses_records['train']:.4f}, val loss: {losses_records['val']:.4f}")
     xb, yb = train_loader.next_batch()
     xb, yb = xb.to(device), yb.to(device)
     optimizer.zero_grad()
     with torch.autocast(device_type=device, dtype=torch.bfloat16):
         _, loss = model(xb, yb)
     loss.backward()
-    with torch.no_grad():
-        print(loss.mean())
+    #compute L2 norm of all the gradient tensors viewed as a single vector and clip all gradients if the total norm exceed the threshold supplied here. Happens before optimizer step. 
+    # this is a global norm based clip, and not a per-parameter-clip. max_norm as 1.0 is the setting in the gpt3 paper so thats where he got it from. 
+    # Unlucky batch -> high loss -> high gradient update -> shock the model. So clip. 
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = get_lr(iteration) #cosine decayed learning rate scheduler
     optimizer.step()
     torch.cuda.synchronize() # wait for the GPU to finish work
     t1 = time.time()
     dt = (t1 - t0)*1000 # time difference in miliseconds
     tokens_processed = (train_loader.B * train_loader.T) 
     tokens_persec = tokens_processed/dt
-    print(f"step {iteration} | loss: {loss.item():.6f} | dt: {dt:.2f}ms | tok/sec: {tokens_persec:.2f}")
+    print(f"step {iteration} | loss: {loss.item():.6f} | norm: {norm:.4f}  | dt: {dt:.2f}ms | tok/sec: {tokens_persec:.2f}")
 
 import sys
 sys.exit(0)
