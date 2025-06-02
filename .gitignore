@@ -2,3 +2,5 @@ throw.ipynb
 __pycache__/dataloader.cpython-311.pyc
 utils/__pycache__/learning_rate_scheduler.cpython-311.pyc
 utils/__pycache__/optimizers.cpython-311.pyc
+train-gpt.py
+utils/__pycache__/gradient_accumulation.cpython-311.pyc

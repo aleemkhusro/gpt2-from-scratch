@@ -5,6 +5,7 @@ from torch.nn import functional as F
 from dataloader import DataLoaderLite
 from utils.learning_rate_scheduler import get_lr
 from utils.optimizers import configure_optimizers
+from utils import gradient_accumulation
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 max_iters = 5000
 eval_interval = 20
@@ -165,16 +166,23 @@ optimizer = configure_optimizers(weight_decay=0.1, learning_rate = 6e-04, model 
 train_loader =DataLoaderLite(B=8, T=512)
 # torch.set_float32_matmul_precision('high')
 
-max_iters = 1
-# xb, yb = get_batch('train', config)
+
+gradient_accum_steps = gradient_accumulation.get_step_count(train_loader.B , train_loader.T)
+
 for iteration in range(150):
     t0 = time.time()
-    xb, yb = train_loader.next_batch()
-    xb, yb = xb.to(device), yb.to(device)
     optimizer.zero_grad()
-    with torch.autocast(device_type=device, dtype=torch.bfloat16):
-        _, loss = model(xb, yb)
-    loss.backward()
+    loss_accum = 0.0
+    # accumulation needed to simulate large batch size to reprdouce the results of gpt2. Can't fit 0.5M tokens in one batch on consumer grade GPU.
+    for micro_step in range(gradient_accum_steps):
+        xb, yb = train_loader.next_batch()
+        xb, yb = xb.to(device), yb.to(device)
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+            _, loss = model(xb, yb)
+        #the loss is the mean of the loss of all batches. When using gradient accumulation, you also need to normalize with the number of accumulations to have proper mean.
+        loss = loss / gradient_accum_steps
+        loss_accum += loss.detach() #using loss.itme() will result in GPU->CPU trip every micro batch
+        loss.backward()
     #compute L2 norm of all the gradient tensors viewed as a single vector and clip all gradients if the total norm exceed the threshold supplied here. Happens before optimizer step. 
     # this is a global norm based clip, and not a per-parameter-clip. max_norm as 1.0 is the setting in the gpt3 paper so thats where he got it from. 
     # Unlucky batch -> high loss -> high gradient update -> shock the model. So clip. 
@@ -186,9 +194,9 @@ for iteration in range(150):
     torch.cuda.synchronize() # wait for the GPU to finish work
     t1 = time.time()
     dt = (t1 - t0)*1000 # time difference in miliseconds
-    tokens_processed = (train_loader.B * train_loader.T) 
+    tokens_processed = (train_loader.B * train_loader.T * gradient_accum_steps) 
     tokens_persec = tokens_processed/(t1-t0)
-    print(f"step {iteration} | loss: {loss.item():.6f} | norm: {norm:.4f}  | lr = {lr:.4e} | dt: {dt:.2f}ms | tok/sec: {tokens_persec:.2f}")
+    print(f"step {iteration} | loss: {loss_accum.item():.6f} | norm: {norm:.4f}  | lr = {lr:.4e} | dt: {dt:.2f}ms | tok/sec: {tokens_persec:.2f}")
 
 import sys
 sys.exit(0)
