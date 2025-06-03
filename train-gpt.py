@@ -6,6 +6,12 @@ from dataloader import DataLoaderLite
 from utils.learning_rate_scheduler import get_lr
 from utils.optimizers import configure_optimizers
 from utils import gradient_accumulation
+import sys
+import os
+from torch.distributed import init_process_group, destroy_process_group
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist
+
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 max_iters = 5000
 eval_interval = 20
@@ -14,7 +20,7 @@ learning_rate = 3e-4
 
 @dataclass
 class GPTConfig:
-    block_size: int = 512
+    block_size: int = 1024
     vocab_size: int = 50304
     n_layer: int = 12
     n_head: int = 12
@@ -151,6 +157,27 @@ class GPT(nn.Module):
         
         return logits, None
 
+# --------------------------- DDP settings
+
+ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
+if ddp:
+    
+    assert torch.cuda.is_available()
+    init_process_group(backend='nccl')
+    ddp_rank = int(os.environ['RANK'])
+    ddp_local_rank = int(os.environ['LOCAL_RANK'])
+    ddp_world_size = int(os.environ['WORLD_SIZE'])
+    device = f'cuda:{ddp_local_rank}'
+    torch.cuda.set_device(device)
+    master_process = ddp_rank == 0 # this process will do logging, checkpointing etc. This evaluates to True when the ddp_rank = 0
+else:
+    # vanilla, non-DDP run
+    ddp_rank = 0
+    ddp_local_rank = 0
+    ddp_world_size = 1
+    master_process = True
+    device = 'cuda'
+print( f" I am GPU {ddp_rank}, and the local rank is {ddp_local_rank}")
 
 # --------------------------model init and train
 import time
@@ -161,13 +188,19 @@ torch.set_float32_matmul_precision('high')
 config = GPTConfig()
 model = GPT(config)
 model.to(device)
-optimizer = configure_optimizers(weight_decay=0.1, learning_rate = 6e-04, model = model)
+model = torch.compile(model)
+if ddp:
+    model = DDP(model, device_ids=[ddp_local_rank])
+raw_model = model.module
+optimizer = configure_optimizers(weight_decay=0.1, learning_rate = 6e-04, model = raw_model, master_process = master_process)
 
-train_loader =DataLoaderLite(B=8, T=512)
-# torch.set_float32_matmul_precision('high')
+train_loader = DataLoaderLite(ddp_rank, ddp_world_size, B=16, T=1024 )
+torch.set_float32_matmul_precision('high') #uses TFloat32 when mixed precision is used in autocast below. Rest everything is bfloat16. 
 
+gradient_accum_steps = gradient_accumulation.get_step_count(train_loader.B , train_loader.T, ddp_world_size)
 
-gradient_accum_steps = gradient_accumulation.get_step_count(train_loader.B , train_loader.T)
+if master_process:
+    print(f'gradient accumulation steps: {gradient_accum_steps}' )
 
 for iteration in range(150):
     t0 = time.time()
@@ -177,12 +210,21 @@ for iteration in range(150):
     for micro_step in range(gradient_accum_steps):
         xb, yb = train_loader.next_batch()
         xb, yb = xb.to(device), yb.to(device)
-        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+        with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
             _, loss = model(xb, yb)
         #the loss is the mean of the loss of all batches. When using gradient accumulation, you also need to normalize with the number of accumulations to have proper mean.
         loss = loss / gradient_accum_steps
         loss_accum += loss.detach() #using loss.itme() will result in GPU->CPU trip every micro batch
+        if ddp:
+            # we dont need to sync the gradients between all the GPUs at every loss.backwards. We can allow for gradient accumulation and then sync the gradients at the last step
+            steps_diff = gradient_accum_steps - micro_step
+            if steps_diff == 1:
+                model.require_backward_grad_sync = True
+            else:
+                model.require_backward_grad_sync = False
         loss.backward()
+    if ddp:
+        dist.all_reduce(loss_accum, async_op=dist.ReduceOp.AVG)
     #compute L2 norm of all the gradient tensors viewed as a single vector and clip all gradients if the total norm exceed the threshold supplied here. Happens before optimizer step. 
     # this is a global norm based clip, and not a per-parameter-clip. max_norm as 1.0 is the setting in the gpt3 paper so thats where he got it from. 
     # Unlucky batch -> high loss -> high gradient update -> shock the model. So clip. 
@@ -194,9 +236,10 @@ for iteration in range(150):
     torch.cuda.synchronize() # wait for the GPU to finish work
     t1 = time.time()
     dt = (t1 - t0)*1000 # time difference in miliseconds
-    tokens_processed = (train_loader.B * train_loader.T * gradient_accum_steps) 
+    tokens_processed = (train_loader.B * train_loader.T * gradient_accum_steps * ddp_world_size) 
     tokens_persec = tokens_processed/(t1-t0)
-    print(f"step {iteration} | loss: {loss_accum.item():.6f} | norm: {norm:.4f}  | lr = {lr:.4e} | dt: {dt:.2f}ms | tok/sec: {tokens_persec:.2f}")
+    if master_process:
+        print(f"step {iteration} | loss: {loss_accum.item():.6f} | norm: {norm:.4f}  | lr = {lr:.4e} | dt: {dt:.2f}ms | tok/sec: {tokens_persec:.2f}")
 
 import sys
 sys.exit(0)
